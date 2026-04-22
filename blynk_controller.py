@@ -1,120 +1,100 @@
-import requests
+import BlynkLib
 import random
 import time
 import os
 
 # ==================== CONFIG ====================
 TOKEN = os.getenv("BLYNK_TOKEN", "J0mG1DGyxhny2UNE3Lc8t_8NhXfntB75")
-BASE  = "https://sgp1.blynk.cloud/external/api"
 
-TEMP_UPDATE_INTERVAL = 5   # giây
-LOOP_INTERVAL        = 0.5  # giây (giảm flood request)
+TEMP_FAN_THRESHOLD  = 27
+TEMP_LAMP_THRESHOLD = 20
 
-TEMP_FAN_THRESHOLD  = 27   # độ C → bật quạt
-TEMP_LAMP_THRESHOLD = 20   # độ C → bật đèn
+PIN_TEMP      = 0
+PIN_HUMI      = 1
+PIN_FAN       = 2
+PIN_LAMP      = 3
+PIN_RESET_BTN = 4
+PIN_MODE_DISP = 7
 
-# V-pin map
-PIN_TEMP      = "V0"
-PIN_HUMI      = "V1"
-PIN_FAN       = "V2"
-PIN_LAMP      = "V3"
-PIN_RESET_BTN = "V4"  # nút reset về AUTO trên app
-PIN_MODE_DISP = "V7"  # label hiển thị mode
+# ==================== STATE ====================
+state = {
+    "mode": "AUTO",
+    "temp": 25,
+    "humi": 60,
+    "fan":  0,
+    "lamp": 0,
+    "last_update": time.time(),
+}
 
-# ==================== API ====================
-def get_vpin(pin: str, default: int = 0) -> int:
-    try:
-        res = requests.get(
-            f"{BASE}/get?token={TOKEN}&{pin}",
-            timeout=3
-        )
-        res.raise_for_status()
-        return int(res.text)
-    except Exception as e:
-        print(f"[WARN] get_vpin({pin}) failed: {e}")
-        return default
+# ==================== BLYNK ====================
+blynk = BlynkLib.Blynk(TOKEN)
 
-def set_vpin(pin: str, value) -> bool:
-    try:
-        res = requests.get(
-            f"{BASE}/update?token={TOKEN}&{pin}={value}",
-            timeout=3
-        )
-        res.raise_for_status()
-        return True
-    except Exception as e:
-        print(f"[WARN] set_vpin({pin}={value}) failed: {e}")
-        return False
-
-# ==================== HELPERS ====================
-def update_mode_display(mode: str):
-    label = "🟢 AUTO" if mode == "AUTO" else "🔴 MANUAL"
-    set_vpin(PIN_MODE_DISP, label)
+def update_mode_display():
+    label = "🟢 AUTO" if state["mode"] == "AUTO" else "🔴 MANUAL"
+    blynk.virtual_write(PIN_MODE_DISP, label)
     print(f"[MODE] → {label}")
 
-def control_devices(temp: int):
-    """AUTO mode: điều khiển quạt/đèn theo nhiệt độ."""
-    fan  = 1 if temp > TEMP_FAN_THRESHOLD  else 0
-    lamp = 1 if temp < TEMP_LAMP_THRESHOLD else 0
-    set_vpin(PIN_FAN,  fan)
-    set_vpin(PIN_LAMP, lamp)
+def auto_control():
+    fan  = 1 if state["temp"] > TEMP_FAN_THRESHOLD  else 0
+    lamp = 1 if state["temp"] < TEMP_LAMP_THRESHOLD else 0
+    blynk.virtual_write(PIN_FAN,  fan)
+    blynk.virtual_write(PIN_LAMP, lamp)
+    state["fan"]  = fan
+    state["lamp"] = lamp
     print(f"[AUTO] Fan={'ON' if fan else 'OFF'} | Lamp={'ON' if lamp else 'OFF'}")
-    return fan, lamp
 
-# ==================== MAIN ====================
+# --- User gạt nút Quạt ---
+@blynk.on(f"V{PIN_FAN}")
+def fan_handler(value):
+    if state["mode"] == "AUTO":
+        print("[INFO] Fan toggled → MANUAL")
+        state["mode"] = "MANUAL"
+        update_mode_display()
+    state["fan"] = int(value[0])
+    print(f"[MANUAL] Fan={'ON' if state['fan'] else 'OFF'}")
+
+# --- User gạt nút Đèn ---
+@blynk.on(f"V{PIN_LAMP}")
+def lamp_handler(value):
+    if state["mode"] == "AUTO":
+        print("[INFO] Lamp toggled → MANUAL")
+        state["mode"] = "MANUAL"
+        update_mode_display()
+    state["lamp"] = int(value[0])
+    print(f"[MANUAL] Lamp={'ON' if state['lamp'] else 'OFF'}")
+
+# --- Nút Reset về AUTO ---
+@blynk.on(f"V{PIN_RESET_BTN}")
+def reset_handler(value):
+    if int(value[0]) == 1:
+        print("[INFO] Reset → AUTO")
+        state["mode"] = "AUTO"
+        update_mode_display()
+        blynk.virtual_write(PIN_RESET_BTN, 0)
+        auto_control()
+
+# --- Khi kết nối thành công ---
+@blynk.on("connected")
+def connected():
+    print("[INFO] Blynk connected! Device is ONLINE.")
+    update_mode_display()
+
+# ==================== MAIN LOOP ====================
 def main():
-    mode = "AUTO"
-    update_mode_display(mode)
-
-    last_fan  = get_vpin(PIN_FAN)
-    last_lamp = get_vpin(PIN_LAMP)
-    temp      = 25
-    humi      = 60
-    last_temp_update = time.time()
-
-    print("[INFO] Blynk controller started.\n")
-
+    print("[INFO] Starting Blynk controller...")
     while True:
+        blynk.run()
         now = time.time()
-
-        # --- Cập nhật sensor mỗi TEMP_UPDATE_INTERVAL giây ---
-        if now - last_temp_update >= TEMP_UPDATE_INTERVAL:
-            temp = random.randint(18, 35)
-            humi = random.randint(40, 90)
-            set_vpin(PIN_TEMP, temp)
-            set_vpin(PIN_HUMI, humi)
-            print(f"[SENSOR] Temp: {temp}°C | Humi: {humi}%")
-            last_temp_update = now
-
-        # --- Đọc trạng thái nút từ app ---
-        current_fan   = get_vpin(PIN_FAN)
-        current_lamp  = get_vpin(PIN_LAMP)
-        reset_pressed = get_vpin(PIN_RESET_BTN)
-
-        # --- Nút Reset: MANUAL → AUTO ---
-        if mode == "MANUAL" and reset_pressed == 1:
-            print("[INFO] Reset button pressed → AUTO")
-            mode = "AUTO"
-            update_mode_display(mode)
-            set_vpin(PIN_RESET_BTN, 0)  # tắt nút reset trên app
-            last_fan, last_lamp = control_devices(temp)
-
-        # --- Phát hiện user bấm tay: AUTO → MANUAL ---
-        elif mode == "AUTO":
-            if current_fan != last_fan or current_lamp != last_lamp:
-                print("[INFO] Manual input detected → MANUAL")
-                mode = "MANUAL"
-                update_mode_display(mode)
-
-        # --- Điều khiển theo mode ---
-        if mode == "AUTO":
-            last_fan, last_lamp = control_devices(temp)
-        else:
-            last_fan  = current_fan
-            last_lamp = current_lamp
-
-        time.sleep(LOOP_INTERVAL)
-
+        if now - state["last_update"] >= 5:
+            state["temp"] = random.randint(18, 35)
+            state["humi"] = random.randint(40, 90)
+            blynk.virtual_write(PIN_TEMP, state["temp"])
+            blynk.virtual_write(PIN_HUMI, state["humi"])
+            print(f"[SENSOR] Temp: {state['temp']}°C | Humi: {state['humi']}%")
+            if state["mode"] == "AUTO":
+                auto_control()
+            state["last_update"] = now
+        time.sleep(0.1)
 
 if __name__ == "__main__":
     main()

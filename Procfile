@@ -1,0 +1,1 @@
+worker: python blynk_controller.py
